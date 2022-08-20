@@ -30,8 +30,8 @@ One reference would be inside the _DLM_. Upon receiving files from the server to
 // inside DownloadManager::StartNewDownload()
 if (SteamHTTP()->SendHTTPRequest(..., &hSteamAPICall))
 {
-	// Add call for the steamAPI to process it
-	m_HTTPRequestCompleted.AddCall(hSteamAPICall);
+    // Add call for the steamAPI to process it
+    m_HTTPRequestCompleted.AddCall(hSteamAPICall);
 }
 else
 {
@@ -48,9 +48,9 @@ inline void CMultipleCallResults<T, P>::AddCall(SteamAPICall_t hSteamAPICall)
 {
     // ...
 
-	m_mapAPICalls.Insert(hSteamAPICall);
+    m_mapAPICalls.Insert(hSteamAPICall);
 
-	SteamAPI_RegisterCallResult(this, hSteamAPICall);
+    SteamAPI_RegisterCallResult(this, hSteamAPICall);
 }
 ```
 
