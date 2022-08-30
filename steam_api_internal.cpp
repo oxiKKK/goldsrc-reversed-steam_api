@@ -1,4 +1,4 @@
-//========= Copyright © 1996-2001, Valve LLC, All rights reserved. ============
+//========= Copyright ï¿½ 1996-2001, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -469,7 +469,7 @@ void Steam_ShutdownMinidumpInterface()
 
 	if (s_BreakpadInfo != STEAM_BREAKPAD_STEAM)
 	{
-		if (g_MiniDumpSteamClientDllModule.m_bValid)
+		if (!g_MiniDumpSteamClientDllModule.m_bValid)
 			return;
 
 		g_MiniDumpSteamClientDllModule.m_bValid = false;
