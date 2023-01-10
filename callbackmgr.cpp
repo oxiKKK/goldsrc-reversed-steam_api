@@ -1,4 +1,4 @@
-//========= Copyright © 1996-2001, Valve LLC, All rights reserved. ============
+//========= Copyright ï¿½ 1996-2001, Valve LLC, All rights reserved. ============
 //
 // Purpose: 
 //
@@ -20,6 +20,67 @@ static bool s_bRunningCallbacks = false;
 // Callback manager class
 // 
 //-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+// Purpose: Steam callbacks
+//-----------------------------------------------------------------------------
+typedef bool (*pfnSteam_BGetCallback_t)(HSteamPipe hSteamPipe, CallbackMsg_t *pCallbackMsg);
+typedef void (*pfnSteam_FreeLastCallback_t)(HSteamPipe hSteamPipe);
+typedef bool (*pfnSteam_GetAPICallResult_t)(HSteamPipe hSteamPipe, SteamAPICall_t hSteamAPICall, void* pCallback, int cubCallback, int iCallbackExpected, bool* pbFailed);
+typedef bool (*pfnSteam_CallbackDispatchMsg_t)(CallbackMsg_t* pCallbackMessage, bool bGameServerCallbacks);
+
+//-----------------------------------------------------------------------------
+// Purpose: Callback management class
+//-----------------------------------------------------------------------------
+class CCallbackMgr
+{
+private:
+	template<bool bGameServer>
+	using SteamAPICallback = CCallback<CCallbackMgr, SteamAPICallCompleted_t, bGameServer>;
+
+	template<class T>
+	using CallbackMultimap = std::multimap<T, CCallbackBase*>;
+
+public:
+	CCallbackMgr();
+	~CCallbackMgr();
+
+public:
+	void Register(CCallbackBase *pCallback, int iCallback);
+	void Unregister(CCallbackBase *pCallback);
+
+	void RegisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAPICall);
+	void UnregisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAPICall);
+
+	void RegisterInterfaceFuncs(HMODULE hModule);
+
+	void OnSteamAPICallCompleted(SteamAPICallCompleted_t *pCompletedSteamAPICall);
+
+	// Callback dispatch
+	void RunCallbacks(HSteamPipe hSteamPipe, bool bGameServerCallbacks);
+	void DispatchCallback(CallbackMsg_t *pCallbackMsg, bool bGameServerCallbacks);
+	void DispatchCallbackTryCatch(CallbackMsg_t *pCallbackMsg, bool bGameServerCallbacks);
+	void DispatchCallbackNoTryCatch(CallbackMsg_t *pCallbackMsg, bool bGameServerCallbacks);
+
+public:
+	// Call maps
+	CallbackMultimap<int>				m_CallbackMap;
+	CallbackMultimap<SteamAPICall_t>	m_APICallMap;
+
+	// Callback steamclient API
+	pfnSteam_BGetCallback_t 			pfnSteam_BGetCallback;
+	pfnSteam_FreeLastCallback_t 		pfnSteam_FreeLastCallback;
+	pfnSteam_GetAPICallResult_t 		pfnSteam_GetAPICallResult;
+
+	// Communication
+	HSteamUser 							m_hSteamUser;
+	HSteamPipe 							m_hSteamPipe;
+
+	// Callbacks
+	pfnSteam_CallbackDispatchMsg_t 		pfnSteam_CallbackDispatchMsg;
+	SteamAPICallback<false>				m_SteamCallback;
+	SteamAPICallback<true>				m_SteamGameServerCallback;
+};
 
 //-----------------------------------------------------------------------------
 // Purpose: Constructor
@@ -55,27 +116,15 @@ CCallbackMgr::~CCallbackMgr()
 }
 
 //-----------------------------------------------------------------------------
-// Purpose: Looks for a specific APICall handle entry and erases it from the map.
+// Purpose: Adds new callback entry to the map
 //-----------------------------------------------------------------------------
-void CCallbackMgr::UnregisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAPICall)
+void CCallbackMgr::Register(CCallbackBase* pCallback, int iCallback)
 {
-	// Invalidate parameters passed in
-	if (pCallback == nullptr || hAPICall == k_uAPICallInvalid)
-		return;
+	// Tell that we are registered
+	pCallback->m_nCallbackFlags |= pCallback->k_ECallbackFlagsRegistered;
+	pCallback->m_iCallback = iCallback;
 
-	// Cannot unregister null callback indexes
-	if (pCallback->GetICallback() == NULL)
-		return;
-
-	// Callback not registered, cannot unregister
-	if (!(pCallback->m_nCallbackFlags & pCallback->k_ECallbackFlagsRegistered))
-		return;
-
-	// No callbacks inside APICall container
-	if (m_APICallMap.empty())
-		return;
-
-	m_APICallMap.erase(hAPICall);
+	m_CallbackMap.insert(std::make_pair(iCallback, pCallback));
 }
 
 //-----------------------------------------------------------------------------
@@ -92,24 +141,54 @@ void CCallbackMgr::Unregister(CCallbackBase *pCallback)
 	pCallback->m_nCallbackFlags &= ~CCallbackBase::k_ECallbackFlagsRegistered;
 
 	// Find matched callback and unregister it from the list
-	for (auto Iter = m_CallbackMap.find(pCallback->GetICallback());
-		 Iter != m_CallbackMap.end();
-		 Iter++)
+	auto Iter = m_CallbackMap.find(pCallback->GetICallback());
+	if (Iter != m_CallbackMap.end())
 	{
-		// Unmatched pair
-		if (Iter->first != pCallback->GetICallback())
-			break;
-
-		// Found entry we want
 		if (Iter->second == pCallback)
 		{
 			if (Iter == m_CallbackMap.begin())
 				Iter++;
 
 			m_CallbackMap.erase(Iter);
-			break;
+			return;
 		}
 	}
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Adds new call result to the map
+//-----------------------------------------------------------------------------
+void CCallbackMgr::RegisterCallResult(CCallbackBase* pCallback, SteamAPICall_t hAPICall)
+{
+	m_APICallMap.insert(std::make_pair(hAPICall, pCallback));
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Looks for a specific APICall handle entry and erases it from the map.
+//-----------------------------------------------------------------------------
+void CCallbackMgr::UnregisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAPICall)
+{
+	// If already unregistered there's no need to do it again
+	if (!(pCallback->m_nCallbackFlags & CCallbackBase::k_ECallbackFlagsRegistered))
+		return;
+
+	// Mark as unregistered so we don't then process unregisterd api call
+	pCallback->m_nCallbackFlags &= ~CCallbackBase::k_ECallbackFlagsRegistered;
+
+	// Find matched api call and unregister it from the list
+	auto Iter = m_APICallMap.find(pCallback->GetICallback());
+	if (Iter != m_APICallMap.end())
+	{
+		if (Iter->second == pCallback)
+		{
+			if (Iter == m_APICallMap.begin())
+				Iter++;
+
+			m_APICallMap.erase(Iter);
+			return;
+		}
+	}
+
 }
 
 //-----------------------------------------------------------------------------
@@ -139,9 +218,8 @@ void CCallbackMgr::OnSteamAPICallCompleted(SteamAPICallCompleted_t *pCompletedSt
 	SteamAPICall_t	hAPICall;
 
 	hAPICall = pCompletedSteamAPICall->m_hAsyncCall;
-
+	
 	auto APICall = m_APICallMap.find(hAPICall);
-
 	if (APICall == m_APICallMap.end())
 		return;
 
@@ -153,7 +231,9 @@ void CCallbackMgr::OnSteamAPICallCompleted(SteamAPICallCompleted_t *pCompletedSt
 
 	// Try to dispatch the callback
 	if (pfnSteam_GetAPICallResult(m_hSteamPipe, hAPICall, pCallbackData, iCallbackSize, pCallbackBase->GetICallback(), &bIOFailed))
+	{
 		pCallbackBase->Run(pCallbackData, bIOFailed, hAPICall);
+	}
 
 	free(pCallbackData);
 
@@ -203,9 +283,13 @@ void CCallbackMgr::RunCallbacks(HSteamPipe hSteamPipe, bool bGameServerCallbacks
 void CCallbackMgr::DispatchCallback(CallbackMsg_t *pCallbackMsg, bool bGameServerCallbacks)
 {
 	if (g_bCatchExceptionsInCallbacks != false)
+	{
 		DispatchCallbackTryCatch(pCallbackMsg, bGameServerCallbacks);
+	}
 	else
+	{
 		DispatchCallbackNoTryCatch(pCallbackMsg, bGameServerCallbacks);
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -221,21 +305,15 @@ void CCallbackMgr::DispatchCallbackTryCatch(CallbackMsg_t *pCallbackMsg, bool bG
 		bGameServer = false;
 
 		// Look for callbacks with identical indexes and try to dispatch them
-		for (auto Iter = m_CallbackMap.find(pCallbackMsg->m_iCallback);
-			 Iter != m_CallbackMap.end(); 
-			 Iter++)
+		auto Iter = m_CallbackMap.find(pCallbackMsg->m_iCallback);
+		if (Iter != m_CallbackMap.end())
 		{
 			pCallback = Iter->second;
-				
-			if (Iter->first != pCallbackMsg->m_iCallback)
-				break;
-			
+
 			if (bGameServerCallbacks == ((pCallback->m_nCallbackFlags & CCallbackBase::k_ECallbackFlagsGameServer) >> 1))
 			{
 				bGameServer = true;
-
 				pCallback->Run(pCallbackMsg->m_pubParam);
-				break;
 			}
 		}
 
@@ -262,21 +340,15 @@ void CCallbackMgr::DispatchCallbackNoTryCatch(CallbackMsg_t *pCallbackMsg, bool 
 	bGameServer = false;
 
 	// Look for callbacks with identical indexes and try to dispatch them
-	for (auto Iter = m_CallbackMap.find(pCallbackMsg->m_iCallback);
-		 Iter != m_CallbackMap.end();
-		 Iter++)
+	auto Iter = m_CallbackMap.find(pCallbackMsg->m_iCallback);
+	if (Iter != m_CallbackMap.end())
 	{
 		pCallback = Iter->second;
 
-		if (Iter->first != pCallbackMsg->m_iCallback)
-			break;
-
-		if (bGameServerCallbacks == ((pCallback->m_nCallbackFlags & CCallbackBase::k_ECallbackFlagsGameServer) >> 1))
+		if (bGameServerCallbacks == (((pCallback->m_nCallbackFlags & CCallbackBase::k_ECallbackFlagsGameServer) >> 1) == 1))
 		{
 			bGameServer = true;
-
 			pCallback->Run(pCallbackMsg->m_pubParam);
-			break;
 		}
 	}
 
@@ -304,10 +376,7 @@ CCallbackMgr *GCallbackMgr()
 //-----------------------------------------------------------------------------
 void CallbackMgr_RegisterCallback(CCallbackBase *pCallback, int iCallback)
 {
-	if (s_bCallbackManagerInitialized != true)
-		return;
-
-	GCallbackMgr()->m_CallbackMap.insert(std::make_pair(iCallback, pCallback));
+	GCallbackMgr()->Register(pCallback, iCallback);
 }
 
 //-----------------------------------------------------------------------------
@@ -326,10 +395,7 @@ void CallbackMgr_UnregisterCallback(CCallbackBase *pCallback)
 //-----------------------------------------------------------------------------
 void CallbackMgr_RegisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAPICall)
 {
-	if (s_bCallbackManagerInitialized != true)
-		return;
-
-	GCallbackMgr()->m_APICallMap.insert(std::make_pair(hAPICall, pCallback));
+	GCallbackMgr()->RegisterCallResult(pCallback, hAPICall);
 }
 
 //-----------------------------------------------------------------------------
@@ -338,11 +404,6 @@ void CallbackMgr_RegisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAP
 void CallbackMgr_UnregisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAPICall)
 {
 	if (s_bCallbackManagerInitialized != true)
-		return;
-
-	auto APICall = GCallbackMgr()->m_APICallMap.find(hAPICall);
-
-	if (APICall == GCallbackMgr()->m_APICallMap.end())
 		return;
 
 	GCallbackMgr()->UnregisterCallResult(pCallback, hAPICall);
