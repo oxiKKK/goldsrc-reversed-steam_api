@@ -146,11 +146,7 @@ void CCallbackMgr::Unregister(CCallbackBase *pCallback)
 	{
 		if (Iter->second == pCallback)
 		{
-			if (Iter == m_CallbackMap.begin())
-				Iter++;
-
 			m_CallbackMap.erase(Iter);
-			return;
 		}
 	}
 }
@@ -181,11 +177,7 @@ void CCallbackMgr::UnregisterCallResult(CCallbackBase *pCallback, SteamAPICall_t
 	{
 		if (Iter->second == pCallback)
 		{
-			if (Iter == m_APICallMap.begin())
-				Iter++;
-
 			m_APICallMap.erase(Iter);
-			return;
 		}
 	}
 
